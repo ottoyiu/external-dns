@@ -141,21 +141,31 @@ type PDNSAPIClient struct {
 	dryRun  bool
 	authCtx context.Context
 	client  *pgo.APIClient
+	domainFilter DomainFilter
 }
 
 // ListZones : Method returns all enabled zones from PowerDNS
 // ref: https://doc.powerdns.com/authoritative/http-api/zone.html#get--servers-server_id-zones
 func (c *PDNSAPIClient) ListZones() (zones []pgo.Zone, resp *http.Response, err error) {
 	for i := 0; i < retryLimit; i++ {
+		var filteredZones []pgo.Zone
 		zones, resp, err = c.client.ZonesApi.ListZones(c.authCtx, defaultServerID)
 		if err != nil {
 			log.Debugf("Unable to fetch zones %v", err)
 			log.Debugf("Retrying ListZones() ... %d", i)
 			time.Sleep(retryAfterTime * (1 << uint(i)))
 			continue
-
 		}
-		return zones, resp, err
+		if c.domainFilter.IsConfigured() {
+			for _, zone := range zones {
+				if c.domainFilter.Match(zone.Name) {
+					filteredZones = append(filteredZones, zone)
+				}
+			}
+		} else {
+			filteredZones = zones
+		}
+		return filteredZones, resp, err
 	}
 
 	log.Errorf("Unable to fetch zones. %v", err)
@@ -216,10 +226,6 @@ func NewPDNSProvider(config PDNSConfig) (*PDNSProvider, error) {
 		return nil, errors.New("Missing API Key for PDNS. Specify using --pdns-api-key=")
 	}
 
-	// The default for when no --domain-filter is passed is [""], instead of [], so we check accordingly.
-	if len(config.DomainFilter.filters) != 1 && config.DomainFilter.filters[0] != "" {
-		return nil, errors.New("PDNS Provider does not support domain filter")
-	}
 	// We do not support dry running, exit safely instead of surprising the user
 	// TODO: Add Dry Run support
 	if config.DryRun {
@@ -241,6 +247,7 @@ func NewPDNSProvider(config PDNSConfig) (*PDNSProvider, error) {
 			dryRun:  config.DryRun,
 			authCtx: context.WithValue(context.TODO(), pgo.ContextAPIKey, pgo.APIKey{Key: config.APIKey}),
 			client:  pgo.NewAPIClient(pdnsClientConfig),
+			domainFilter: config.DomainFilter,
 		},
 	}
 
